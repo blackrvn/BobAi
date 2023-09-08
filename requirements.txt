@@ -1,0 +1,7 @@
+langchain
+transformers
+pypdf
+sentence_transformers
+chromadb
+mysql-connector-python
+spacy
