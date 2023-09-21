@@ -5,3 +5,6 @@ sentence_transformers
 chromadb
 mysql-connector-python
 spacy
+
+icecream
+tqdm
