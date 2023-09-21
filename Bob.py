@@ -18,21 +18,21 @@ class Bob:
                  tokenizer="de_core_news_lg",
                  store_path="./db",
                  model_path="./Models/openbuddy-llama2-70b-v10.1-q3_k.gguf",
-                 promt_template="""Use the following pieces of context to answer the question at the end. 
-If you don't know the answer, just say that you don't know, don't try to make up an answer. 
-Use three sentences maximum and keep the answer as concise as possible. 
-Answer in German.
-{context}
-Question: {question}
-Helpful Answer:"""):
-        self.promt_template = promt_template
-        self.tokenizer = tokenizer
-        self.store_path = store_path
-        self.model_path = model_path
-        if os.path.exists(self.store_path):
-            self.store = Chroma(persist_directory=self.store_path, embedding_function=self.init_embedding())
-        else:
-            self.store = None
+                 temperature=0,
+                 verbose=False,
+                 n_ctx=4096
+                 ):
+        self.tokenizer = self.init_tokenizer(tokenizer)
+        self.embedding = self.init_embedding()
+        self.vectorstore = self.init_store(store_path, self.embedding)
+        self.retriever = self.init_retriever(self.vectorstore)
+        self.llm = self.init_llm(path=model_path, temperature=temperature, verbose=verbose, n_ctx=n_ctx)
+        self.prompt_template = """Your task is to answer questions about the given guidelines. 
+                                Do this as precise as possible. 
+                                Answer in German.
+                                {context}
+                                Question: {question}
+                                Helpful Answer:"""
 
     @staticmethod
     def load_pdf(pdf_path):
@@ -52,53 +52,61 @@ Helpful Answer:"""):
         )
         return embedding
 
-    def init_tokenizer(self):
-        tokenizer_def = SpacyTextSplitter(
-            pipeline=self.tokenizer,
-            chunk_size=500,
-            chunk_overlap=50,
-            separator='\n'
-        )
-        return tokenizer_def
+    @staticmethod
+    def init_tokenizer(tokenizer):
 
-    def init_store(self, document):
-        store = Chroma.from_documents(
-            documents=document,
-            embedding=self.init_embedding(),
-            persist_directory=self.store_path
+        def tokenizer_func():
+            tokenizer_def = SpacyTextSplitter(
+                pipeline=tokenizer,
+                chunk_size=500,
+                chunk_overlap=50,
+                separator='\n'
+            )
+            return tokenizer_def
+
+        try:
+            tokenizer = tokenizer_func()
+        except OSError:
+            spacy.cli.download(tokenizer)
+            tokenizer = tokenizer_func()
+        finally:
+            return tokenizer
+
+    @staticmethod
+    def init_retriever(store):
+        return store.as_retriever(search_kwargs={"k": 3})
+
+    @staticmethod
+    def init_store(path, embedding):
+        return Chroma(persist_directory=path, embedding_function=embedding)
+
+    @staticmethod
+    def init_llm(**model_kwargs):
+        llm = LlamaCpp(
+            model_path=model_kwargs["path"],
+            verbose=model_kwargs["verbose"],
+            n_ctx=model_kwargs["n_ctx"],
+            n_gpu_layers=18,
+            temperature=model_kwargs["temperature"]
         )
-        self.store = store
+        return llm
+
+    def set_prompt_template(self, prompt):
+        self.prompt_template = prompt
 
     def add_docs(self, pdf_dir_path=".\\pdf\\*.pdf"):
 
-        try:
-            tokenizer = self.init_tokenizer()
-        except OSError:
-            spacy.cli.download(self.tokenizer)
-            tokenizer = self.init_tokenizer()
-
         for pdf in glob(pdf_dir_path):
             document = self.load_pdf(pdf)
-            tokenized_document = tokenizer.split_documents(document)
-            self.init_store(tokenized_document)
+            tokenized_document = self.tokenizer.split_documents(document)
+            self.vectorstore._collection.add(tokenized_document)
 
-    def init_retriever(self):
-        return self.store.as_retriever(search_kwargs={"k": 3})
-
-    def init_chain(self, temperature, question):
-        chain_prompt = PromptTemplate.from_template(self.promt_template)
-
-        llm = LlamaCpp(
-            model_path=self.model_path,
-            verbose=False,
-            n_ctx=4096,
-            n_gpu_layers=18,
-            temperature=temperature
-        )
+    def init_chain(self, question):
+        chain_prompt = PromptTemplate.from_template(self.prompt_template)
 
         retrieval_chain = RetrievalQA.from_chain_type(
-            llm=llm,
-            retriever=self.init_retriever(),
+            llm=self.llm,
+            retriever=self.retriever,
             return_source_documents=True,
             chain_type_kwargs={
                 'prompt': chain_prompt
